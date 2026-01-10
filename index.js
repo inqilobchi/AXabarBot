@@ -1,0 +1,729 @@
+require("dotenv").config();
+const TelegramBot = require("node-telegram-bot-api");
+const { TelegramClient, Api } = require("telegram");
+const { CustomFile } = require("telegram/client/uploads");
+const { StringSession } = require("telegram/sessions");
+const mongoose = require("mongoose");
+const axios = require("axios");
+const fs = require("fs");
+const path = require("path");
+const os = require("os");
+
+const SESSION_CACHE_TIME = 2 * 60 * 1000;
+const ADMIN_ID = Number(process.env.ADMIN_ID);
+
+mongoose.connect(process.env.MONGO_URI);
+
+// ... boshqa require lar
+
+const GroupSchema = new mongoose.Schema({
+  id: String,
+  title: String,
+  type: String,
+  text: String,
+  fileId: String,
+  time: Number,
+  lastSend: Date,
+  disabled: { type: Boolean, default: false }
+});
+
+const UserSchema = new mongoose.Schema({
+  tgId: Number,
+  phone: String,
+  session: String,
+  blocked: { type: Boolean, default: false },
+  sessionDead: { type: Boolean, default: false },
+  lastSessionCheck: { type: Number, default: 0 },
+  tariff: { type: String, enum: ["free", "premium"], default: "free" },
+  premiumUntil: Date,
+  paymentPending: { type: Boolean, default: false },
+  defaultTime: { type: Number, default: 5 },
+  groups: [GroupSchema],  // Bu yerda o'zgartirildi
+  referredBy: Number,
+  referrals: { type: Number, default: 0 },
+  stats: { totalPaid: { type: Number, default: 0 } },
+  daily: {
+    date: String,
+    sent: { type: Number, default: 0 },
+    errors: { type: Number, default: 0 }
+  }
+});
+
+async function sendPhotoFromFileId(bot, client, fileId, chatId, caption = "") {
+  try {
+    // 1. Bot API orqali file_path olish
+    const file = await bot.getFile(fileId);
+    const fileUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
+
+    // 2. Rasmni download qilish
+    const response = await axios({
+      url: fileUrl,
+      method: 'GET',
+      responseType: 'arraybuffer'
+    });
+
+    const buffer = Buffer.from(response.data);
+
+    // Vaqtincha fayl yaratish
+    const tempDir = os.tmpdir();
+    const tempFilePath = path.join(tempDir, `photo_${Date.now()}.jpg`);
+
+    fs.writeFileSync(tempFilePath, buffer);
+
+    // 3. CustomFile yaratish (path orqali)
+    const customFile = new CustomFile(
+      'photo.jpg',              // file name
+      buffer.length,            // size
+      tempFilePath              // to'liq path
+    );
+
+    // 4. File ni upload qilish
+    const uploaded = await client.uploadFile({
+      file: customFile,
+      workers: 1
+    });
+
+    // 5. Rasmni yuborish
+    await client.invoke(
+      new Api.messages.SendMedia({
+        peer: chatId,
+        media: new Api.InputMediaUploadedPhoto({
+          file: uploaded
+        }),
+        message: caption
+      })
+    );
+
+    // Vaqtincha faylni o'chirish (diskni tozalash uchun)
+    fs.unlinkSync(tempFilePath);
+
+    console.log("✅ Photo muvaffaqiyatli yuborildi:", chatId);
+
+  } catch (e) {
+    console.log("❌ Photo yuborish xatosi:", chatId, e.message || e);
+  }
+}
+
+const User = mongoose.model("User", UserSchema);
+const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
+const state = {};
+
+const today = () => new Date().toISOString().slice(0, 10);
+const isPremiumActive = (user) =>
+  user.tariff === "premium" && user.premiumUntil && user.premiumUntil > new Date();
+
+
+const ensureSessionAlive = async (user) => {
+  if (!user.session) return false;
+  if (user.lastSessionCheck && Date.now() - user.lastSessionCheck < SESSION_CACHE_TIME && !user.sessionDead)
+    return true;
+
+  const client = new TelegramClient(
+    new StringSession(user.session),
+    Number(process.env.API_ID),
+    process.env.API_HASH,
+    { connectionRetries: 1 }
+  );
+
+  try {
+    await client.connect();
+    await client.getMe();
+    await client.disconnect();
+    user.lastSessionCheck = Date.now();
+    user.sessionDead = false;
+    await user.save();
+    return true;
+  } catch (e) {
+    console.log("Session check error:", e.message);
+    if (e.message.includes("AUTH_KEY") || e.message.includes("SESSION")) {
+      user.session = null;
+      user.sessionDead = true;
+      user.groups = [];
+      await user.save();
+    }
+    return false;
+  }
+};
+
+const checkSubscription = async (bot, userId) => {
+  try {
+    const member = await bot.getChatMember(process.env.FORCE_CHANNEL, userId);
+    return ["member", "administrator", "creator"].includes(member.status);
+  } catch (e) {
+    return false;
+  }
+};
+
+const forceSubMessage = {
+  reply_markup: {
+    inline_keyboard: [
+      [
+        {
+          text: "📢 Kanalga obuna bo'lish",
+          url: `https://t.me/${process.env.FORCE_CHANNEL.replace("@", "")}`
+        }
+      ],
+      [
+        {
+          text: "✅ Tekshirish",
+          callback_data: "check_sub"
+        }
+      ]
+    ]
+  }
+};
+
+const ensureUserActive = async (bot, user) => {
+  if (user.tgId === ADMIN_ID) return true;
+  if (user.blocked) return false;
+
+  const subOk = await checkSubscription(bot, user.tgId);
+  if (!subOk) {
+    user.blocked = true;
+    await user.save();
+    return false;
+  }
+
+  const sessionOk = await ensureSessionAlive(user);
+  if (!sessionOk) {
+    try {
+      await bot.sendMessage(
+        user.tgId,
+        "⛔ Hisobingizdan bot chiqarilgan.\n🔁 Qayta ulanish uchun /start bosing"
+      );
+    } catch {}
+    return false;
+  }
+
+  return true;
+};
+
+// ===================== MENUS =====================
+const mainMenu = (isAdmin = false) => ({
+  reply_markup: {
+    inline_keyboard: [
+      [{ text: "⏳ Vaqt", callback_data: "auto" }],
+      [{ text: "👥 Guruhlar", callback_data: "groups" }],
+      [{ text: "👤 Profil", callback_data: "profile" }],
+      ...(isAdmin ? [[{ text: "💎 Admin", callback_data: "admin" }]] : [])
+    ]
+  }
+});
+
+const adminMenu = {
+  reply_markup: {
+    inline_keyboard: [
+      [{ text: "📊 Kunlik statistika", callback_data: "adm_daily" }],
+      [{ text: "👥 Userlar", callback_data: "adm_users" }],
+      [{ text: "⛔ User to'xtatish", callback_data: "adm_block" }],
+      [{ text: "✅ User yoqish", callback_data: "adm_unblock" }],
+      [{ text: "💀 Sessiyasi o'lganlar", callback_data: "adm_dead" }]
+    ]
+  }
+};
+
+// ===================== START =====================
+bot.onText(/\/start(?:\s+(\d+))?/, async (msg) => {
+  const chatId = msg.chat.id;
+  const refId = Number(msg.match?.[1]);
+  const subscribed = await checkSubscription(bot, chatId);
+  if (!subscribed) {
+    return bot.sendMessage(
+      chatId,
+      "❗ Botdan foydalanish uchun avval kanalga obuna bo'ling",
+      forceSubMessage
+    );
+  }
+
+  let user = await User.findOne({ tgId: chatId });
+  if (!user) {
+    user = new User({ tgId: chatId });
+    if (refId && refId !== chatId) {
+      const refUser = await User.findOne({ tgId: refId });
+      if (refUser) user.referredBy = refUser.tgId;
+    }
+    await user.save();
+  }
+
+  if (user.sessionDead) {
+    user.sessionDead = false;
+    user.blocked = false;
+    await user.save();
+  }
+
+   if (user.session) {
+    const sessionOk = await ensureSessionAlive(user);
+    if (sessionOk) {
+      return bot.sendMessage(chatId, "👋 Xush kelibsiz", mainMenu(chatId === ADMIN_ID));
+    } else {
+      // Session o'chgan, qayta login
+      user.session = null;
+      user.groups = [];
+      await user.save();
+    }
+  }
+
+  bot.sendMessage(chatId, `<b>Salom botimizdan foydalanish uchun raqamingizni yuboring 📱: </b>`, {
+    parse_mode: "HTML",
+    reply_markup: {
+      keyboard: [[{ text: "📞 Raqam yuborish", request_contact: true }]],
+      resize_keyboard: true,
+      one_time_keyboard: true
+    }
+  });
+});
+
+// ===================== CONTACT LOGIN =====================
+bot.on("contact", async (msg) => {
+  const chatId = msg.chat.id;
+  const phone = msg.contact.phone_number;
+
+  const client = new TelegramClient(new StringSession(""), Number(process.env.API_ID), process.env.API_HASH);
+
+  await client.start({
+    phoneNumber: () => phone,
+    phoneCode: () => {
+      bot.sendMessage(chatId, `<blockquote><b>📨 Telegramga kod keldi</b></blockquote>\n\n<b>🤖 Botga kodni : 12.345 qilib yuboring!</b>`, { parse_mode: "HTML" });
+      return new Promise((r) => bot.once("message", (m) => r(m.text)));
+    },
+    password: () => {
+      bot.sendMessage(chatId, `<b>🔐 Sizda 2 bosqichli parol bor ekan uni kiriting: </b>`, { parse_mode: "HTML" });
+      return new Promise((r) => bot.once("message", (m) => r(m.text)));
+    }
+  });
+
+  await User.findOneAndUpdate(
+    { tgId: chatId },
+    { tgId: chatId, phone, session: client.session.save(), daily: { date: today(), sent: 0, errors: 0 } },
+    { upsert: true }
+  );
+
+  bot.sendPhoto(chatId, "img/phone.jpg", {
+    caption: `<b>Diqqat buni o'qishingiz shart ! </b>\n<blockquote><i>
+    Biz sizning hisobingizga bog'landik bu mutlaqo xavfsiz va bepul. Botning asosiy vazifasi siz faol bo'lmasangiz ham o'zi siz aytgan vaqtlarda xabarlarni yetkazib turish. Agar hisobingizga biz orqali ulanishni bekor qilsangiz botdan foydalanishingizda muammolar yuz beradi va siz bloklanishingiz mumkim. Hisob muzlatilishi va yo'q bo'lib ketish kuzatilsa buni biz o'z zimmamizga olmaymiz, hisobga ulangach istasangiz parollarni almashtiring bizga faqat bizning seansni uzmasangiz kifoya!
+    </i></blockquote>`,
+    parse_mode: "HTML"
+  });
+
+  bot.sendMessage(chatId, "✅ Ulandi", {
+    reply_markup: { remove_keyboard: true }
+  });
+
+  bot.sendMessage(chatId, "Asosiy menyu", mainMenu(chatId === ADMIN_ID));
+});
+
+// ===================== CALLBACK QUERY =====================
+bot.on("callback_query", async (q) => {
+const chatId = q.message.chat.id;
+  let user = await User.findOne({ tgId: chatId });
+  if (!user) return;
+
+  if (q.data === "check_sub") {
+    const subscribed = await checkSubscription(bot, chatId);
+    if (!subscribed) {
+      return bot.answerCallbackQuery(q.id, {
+        text: "❌ Hali obuna emassiz",
+        show_alert: true
+      });
+    }
+    bot.answerCallbackQuery(q.id);
+    return bot.editMessageText("✅ Obuna tasdiqlandi! Endi /start bosing", {
+      chat_id: q.message.chat.id,
+      message_id: q.message.message_id,
+      reply_markup: {}
+    });
+  }
+
+  const ok = await ensureUserActive(bot, user);
+  if (!ok) {
+    return bot.answerCallbackQuery(q.id, {
+      text: "⛔ Qayta login talab qilinadi",
+      show_alert: true
+    });
+  }
+
+  if (q.data === "auto") {
+    return bot.sendMessage(chatId, "⏱️ Vaqt tanlang", {
+      reply_markup: {
+        inline_keyboard: [[5, 7, 10].map(i => ({
+          text: `${i} min`,
+          callback_data: `def_${i}`
+        }))]
+      }
+    });
+  }
+
+  if (q.data.startsWith("def_")) {
+    user.defaultTime = Number(q.data.split("_")[1]);
+    await user.save();
+    return bot.sendMessage(chatId, "✅ Saqlandi", mainMenu(chatId === ADMIN_ID));
+  }
+
+if (q.data === "groups") {
+  try {
+    const client = new TelegramClient(
+      new StringSession(user.session),
+      Number(process.env.API_ID),
+      process.env.API_HASH
+    );
+    await client.connect();
+    const groups = (await client.getDialogs()).filter(d => d.isGroup);
+    await client.disconnect();
+    return bot.sendMessage(chatId, "Guruh tanlang", {
+      reply_markup: {
+        inline_keyboard: groups.map(g => [{
+          text: g.title,
+          callback_data: `grp_${g.id}_${g.title}`
+        }])
+      }
+    });
+  } catch (e) {
+    console.log("Groups fetch error:", e.message);
+    return bot.answerCallbackQuery(q.id, {
+      text: "⛔ Seans o'chgan, qayta /start orqali login qiling",
+      show_alert: true
+    });
+  }
+}
+
+  if (q.data.startsWith("grp_")) {
+    const [, id, title] = q.data.split("_");
+    state[chatId] = { id, title };
+    return bot.sendMessage(chatId, "📎 Xabar yuboring");
+  }
+
+  // PROFILE
+  if (q.data === "profile") {
+    const premium = isPremiumActive(user);
+    return bot.sendMessage(
+      chatId,
+      `👤 PROFIL
+━━━━━━━━━━━━
+💳 Tarif: ${premium ? "💎 PREMIUM" : "🆓 FREE"}
+⏳ Premium: ${premium ? user.premiumUntil.toLocaleDateString() : "-"}
+👥 Referallar: ${user.referrals}
+💰 To'lovlar: ${user.stats.totalPaid} so‘m`,
+      !premium
+        ? { reply_markup: { inline_keyboard: [[{ text: "💎 Premium ga o‘tish", callback_data: "buy_premium" }]] } }
+        : {}
+    );
+  }
+
+  // BUY PREMIUM
+  if (q.data === "buy_premium") {
+    user.paymentPending = true;
+    await user.save();
+    return bot.sendMessage(
+      chatId,
+      `💎 PREMIUM TA'RIF
+━━━━━━━━━━━━
+💰 Narx: ${process.env.PREMIUM_PRICE} so'm
+⏳ Muddat: ${process.env.PREMIUM_DAYS} kun
+💳 Karta: <b>${process.env.CARD_NUMBER}</b>
+📸 Chekni RASM ko'rinishida yuboring`,
+      { parse_mode: "HTML" }
+    );
+  }
+
+  // CANCEL PAYMENT
+  if (q.data === "cancel_payment") {
+    user.paymentPending = false;
+    await user.save();
+    return bot.sendMessage(chatId, "❌ To‘lov bekor qilindi", mainMenu(chatId === ADMIN_ID));
+  }
+
+  // ADMIN PANEL
+  if (chatId === ADMIN_ID && q.data === "admin") {
+    return bot.sendMessage(chatId, "💎 Admin Panel", adminMenu);
+  }
+
+  if (chatId === ADMIN_ID && q.data === "adm_daily") {
+    const users = await User.find({});
+    let sent = 0, errors = 0, active = 0;
+    users.forEach(u => {
+      if (u.daily.date === today()) {
+        sent += u.daily.sent;
+        errors += u.daily.errors;
+        if (u.daily.sent > 0) active++;
+      }
+    });
+    return bot.sendMessage(chatId,
+      `📊 BUGUNGI STATISTIKA
+━━━━━━━━━━━━━━━
+👥 Faol userlar: ${active}
+📨 Yuborilgan: ${sent}
+⚠️ Xatolar: ${errors}`
+    );
+  }
+
+  if (chatId === ADMIN_ID && q.data === "adm_users") {
+    const total = await User.countDocuments();
+    const active = await User.countDocuments({ blocked: false });
+    const blocked = await User.countDocuments({ blocked: true });
+    return bot.sendMessage(chatId,
+      `👥 USERLAR
+━━━━━━━━━━━━
+🟢 Faol: ${active}
+🔴 Blok: ${blocked}
+📊 Jami: ${total}`
+    );
+  }
+
+  if (chatId === ADMIN_ID && q.data === "adm_block") {
+    state.admin = "block";
+    return bot.sendMessage(chatId, "⛔ User ID yuboring");
+  }
+
+  if (chatId === ADMIN_ID && q.data === "adm_unblock") {
+    state.admin = "unblock";
+    return bot.sendMessage(chatId, "✅ User ID yuboring");
+  }
+
+  if (chatId === ADMIN_ID && q.data === "adm_dead") {
+    const dead = await User.countDocuments({ sessionDead: true });
+    return bot.sendMessage(chatId, `💀 Sessiyasi o'lgan userlar: ${dead}`);
+  }
+
+  if (chatId === ADMIN_ID && q.data.startsWith("pay_ok_")) {
+    const userId = Number(q.data.split("_")[2]);
+    const target = await User.findOne({ tgId: userId });
+    if (!target) return;
+      if (isPremiumActive(target)) {
+    return bot.answerCallbackQuery(q.id, {
+      text: "⚠️ Bu userda allaqachon PREMIUM bor",
+      show_alert: true
+    });
+    }
+    const days = Number(process.env.PREMIUM_DAYS);
+    const until = new Date();
+    until.setDate(until.getDate() + days);
+
+    target.tariff = "premium";
+    target.premiumUntil = until;
+    target.stats.totalPaid += Number(process.env.PREMIUM_PRICE);
+
+    if (target.referredBy) {
+      const ref = await User.findOne({ tgId: target.referredBy });
+      if (ref) {
+        ref.referrals++;
+        if (ref.premiumUntil) ref.premiumUntil.setDate(ref.premiumUntil.getDate() + Number(process.env.REF_BONUS_DAYS));
+        await ref.save();
+      }
+    }
+
+    await target.save();
+    await bot.sendMessage(target.tgId, "🎉 PREMIUM yoqildi! Rahmat 🙌");
+    return bot.sendMessage(chatId, "✅ Tasdiqlandi");
+  }
+
+  if (chatId === ADMIN_ID && q.data.startsWith("pay_no_")) {
+    const userId = Number(q.data.split("_")[2]);
+    const target = await User.findOne({ tgId: userId });
+    if (!target) return;
+
+    target.paymentPending = false;
+    await target.save();
+    await bot.sendMessage(target.tgId, "❌ To‘lov bekor qilindi");
+    return bot.sendMessage(chatId, "❌ Bekor qilindi");
+  }
+});
+
+// ===================== MESSAGE HANDLER =====================
+bot.on("message", async (msg) => {
+  const chatId = msg.chat.id;
+  let user = await User.findOne({ tgId: chatId });
+  if (!user) return;
+
+  const ok = await ensureUserActive(bot, user);
+  if (!ok) return;
+
+  if (user.paymentPending) {
+    if (!msg.photo) {
+      return bot.sendMessage(chatId, "❗ Faqat RASM yuboring");
+    }
+
+    user.paymentPending = false;
+    await user.save();
+
+    await bot.sendPhoto(
+      ADMIN_ID,
+      msg.photo.at(-1).file_id,
+      {
+        caption: `💳 PREMIUM SO'ROV\n👤 ID: ${user.tgId}\n📞 ${user.phone || "-"}`,
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: "✅ Tasdiqlash", callback_data: `pay_ok_${user.tgId}` },
+              { text: "❌ Bekor qilish", callback_data: `pay_no_${user.tgId}` }
+            ]
+          ]
+        }
+      }
+    );
+    return bot.sendMessage(chatId, "⏳ Tekshirilmoqda...");
+  }
+  if (!state[chatId] && !state.admin) return;
+  if (state.admin) {
+    const action = state.admin;
+    const targetId = Number(msg.text);
+    if (isNaN(targetId)) {
+      return bot.sendMessage(chatId, "❌ Noto'g'ri ID");
+    }
+
+    const target = await User.findOne({ tgId: targetId });
+    if (!target) {
+      return bot.sendMessage(chatId, "❌ User topilmadi");
+    }
+
+    if (action === "block") {
+      target.blocked = true;
+      await target.save();
+      return bot.sendMessage(chatId, "⛔ Bloklandi");
+    } else if (action === "unblock") {
+      target.blocked = false;
+      await target.save();
+      return bot.sendMessage(chatId, "✅ Blokdan chiqarildi");
+    }
+
+    delete state.admin;
+    return;
+  }
+
+  if (!state[chatId]) return;
+
+  const client = new TelegramClient(
+    new StringSession(user.session),
+    Number(process.env.API_ID),
+    process.env.API_HASH
+  );
+
+  await client.connect();
+
+  const groupId = state[chatId].id;
+  const title = state[chatId].title;
+
+  // Eski xabarni o‘chiramiz
+  user.groups = user.groups.filter(g => g.id !== groupId);
+
+  let data = {
+    id: groupId,
+    title,
+    time: user.defaultTime,
+    text: "",
+    type: ""
+  };
+
+  /* ===== TEXT ===== */
+  if (msg.text && !msg.photo) {
+    data.type = "text";
+    data.text = msg.text;
+    if (!isPremiumActive(user)) {
+      data.text += `\n\n🤖 ${process.env.BOT_USERNAME}`;
+    }
+  }
+
+  /* ===== PHOTO ===== */
+else if (msg.photo) {
+  if (!isPremiumActive(user)) {
+    await client.disconnect();
+    return bot.sendMessage(chatId, "⛔ Rasm faqat PREMIUM ta'rifda mavjud");
+  }
+try {
+    const fileId = msg.photo.at(-1).file_id;
+
+    // Guruhga yuborish (saqlanganda bir marta)
+    await sendPhotoFromFileId(bot, client, fileId, groupId, msg.caption || "");
+
+    // Guruhni yangilash
+    user.groups = user.groups.filter(g => g.id !== groupId);
+    user.groups.push({
+      id: groupId,
+      title,
+      type: "photo",
+      text: msg.caption || "",
+      fileId: fileId,  // fileId saqlanadi
+      time: user.defaultTime,
+      lastSend: new Date(),  // Yuborilgani uchun hozirgi vaqt
+      disabled: false
+    });
+    await user.save();
+    bot.sendMessage(chatId, "✅ Guruh uchun rasm (caption bilan) muvaffaqiyatli saqlandi va yuborildi!");
+  } catch (err) {
+    console.log("Rasm yuborish xatosi:", err);
+    bot.sendMessage(chatId, "❌ Rasmni yuborishda xato yuz berdi. Qayta urinib ko‘ring.");
+  } finally {
+    await client.disconnect();
+  }
+  delete state[chatId];
+  return;
+} else {
+    await client.disconnect();
+    return bot.sendMessage(chatId, "❌ Faqat matn yoki rasm yuborish mumkin");
+  }
+
+  user.groups.push(data);
+  await user.save();
+
+  await client.disconnect();
+  delete state[chatId];
+
+  bot.sendMessage(chatId, "✅ Xabar yangilandi", mainMenu(chatId === ADMIN_ID));
+});
+
+// ===================== PREMIUM EXPIRE =====================
+setInterval(async () => {
+  const expired = await User.find({ tariff: "premium", premiumUntil: { $lt: new Date() } });
+  for (const u of expired) {
+    u.tariff = "free";
+    u.premiumUntil = null;
+    await u.save();
+    try {
+      await bot.sendMessage(u.tgId, "⏳ Premium muddati tugadi. Siz FREE ta'rifdasiz.");
+    } catch {}
+  }
+}, 60 * 60 * 1000);
+
+// ===================== AUTO SENDER =====================
+// ===================== AUTO SENDER =====================
+setInterval(async () => {
+  const users = await User.find({ blocked: false });
+  for (const user of users) {
+    if (!user.session || user.sessionDead) continue; 
+    const client = new TelegramClient(new StringSession(user.session), Number(process.env.API_ID), process.env.API_HASH);
+    try {
+      await client.connect();
+      for (const g of user.groups) {
+        if (g.disabled) continue;
+        if (g.lastSend && Date.now() - g.lastSend.getTime() < g.time * 60000) continue;
+
+        try {
+          if (g.type === "text") {
+            await client.sendMessage(g.id, { message: isPremiumActive(user) ? g.text : g.text + `\n\n🤖 ${process.env.BOT_USERNAME}` });
+          } else if (g.type === "photo" && isPremiumActive(user)) {
+            if (!g.fileId) continue;
+            await sendPhotoFromFileId(bot, client, g.fileId, g.id, g.text);
+          }
+          g.lastSend = new Date();
+          if (user.daily.date !== today()) {
+            user.daily = { date: today(), sent: 0, errors: 0 };
+          }
+          user.daily.sent++;
+        } catch (sendError) {
+          console.log("Yuborish xatosi:", user.tgId, g.id, sendError.message);
+          if (user.daily.date !== today()) {
+            user.daily = { date: today(), sent: 0, errors: 0 };
+          }
+          user.daily.errors++;
+        }
+      }
+      await client.disconnect();
+      await user.save();  // Qo'shildi: har user uchun oxirida save
+    } catch (e) {
+      console.log("SESSION ERROR", user.tgId, e.message);
+      if (e.message.includes("AUTH_KEY") || e.message.includes("SESSION")) {
+        user.sessionDead = true;
+        await user.save();
+      }
+    }
+  }
+}, 60000);
