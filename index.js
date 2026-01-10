@@ -3,6 +3,8 @@ const TelegramBot = require("node-telegram-bot-api");
 const { TelegramClient, Api } = require("telegram");
 const { CustomFile } = require("telegram/client/uploads");
 const { StringSession } = require("telegram/sessions");
+const Fastify = require('fastify');
+const fastify = Fastify({ logger: true });
 const mongoose = require("mongoose");
 const axios = require("axios");
 const fs = require("fs");
@@ -105,7 +107,58 @@ async function sendPhotoFromFileId(bot, client, fileId, chatId, caption = "") {
 }
 
 const User = mongoose.model("User", UserSchema);
-const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
+const token = process.env.BOT_TOKEN;
+const bot = new TelegramBot(token, { webHook: true });
+
+const WEBHOOK_PATH = `/webhook/${token}`;
+const FULL_WEBHOOK_URL = `${process.env.PUBLIC_URL}${WEBHOOK_PATH}`;
+
+// Webhook endpoint
+fastify.post(WEBHOOK_PATH, (req, reply) => {
+  try {
+    bot.processUpdate(req.body);  // Telegram update-larni botga uzatish juda muhim
+    console.log('Update processed:', req.body);
+    reply.code(200).send();       // Telegram API uchun 200 OK javob qaytarish kerak
+  } catch (error) {
+    console.error('Error processing update:', error);
+    reply.sendStatus(500);
+  }
+});
+
+// Health check endpoint
+fastify.get('/healthz', (req, reply) => {
+  reply.send({ status: 'ok' });
+});
+
+// Serverni ishga tushirish va webhook o‘rnatish
+fastify.listen({ port: process.env.PORT || 3000, host: '0.0.0.0' }, async (err, address) => {
+  if (err) {
+    fastify.log.error(err);
+    process.exit(1);
+  }
+
+  fastify.log.info(`Server listening at ${address}`);
+
+  try {
+const response = await axios.post(`https://api.telegram.org/bot${token}/setWebhook`, null, {
+  params: { url: FULL_WEBHOOK_URL }
+});
+
+    if (response.data.ok) {
+      fastify.log.info('Webhook successfully set:', response.data);
+    } else {
+      fastify.log.error('Failed to set webhook:', response.data);
+    }
+  } catch (error) {
+    fastify.log.error('Error setting webhook:', error.message);
+  }
+});
+bot.getMe().then((botInfo) => {
+  bot.me = botInfo;
+  console.log(`🤖 Bot ishga tushdi: @${bot.me.username}`);
+}).catch((err) => {
+  console.error("Bot ma'lumotini olishda xatolik:", err.message);
+});
 const state = {};
 
 const today = () => new Date().toISOString().slice(0, 10);
