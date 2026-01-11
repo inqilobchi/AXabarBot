@@ -417,8 +417,11 @@ const chatId = q.message.chat.id;
   let user = await User.findOne({ tgId: chatId });
   if (!user && chatId !== ADMIN_ID) return;
   if (!user && chatId === ADMIN_ID) {
-    user = new User({ tgId: chatId });
-    await user.save();
+    user = await User.findOneAndUpdate(
+      { tgId: chatId },
+      { tgId: chatId },
+      { upsert: true, new: true }
+    );
   }
 if (q.data === "check_sub") {
   const subscribed = await checkSubscription(bot, chatId);
