@@ -433,7 +433,6 @@ const chatId = q.message.chat.id;
     }
   }
 
-});
 if (q.data === "check_sub") {
   const subscribed = await checkSubscription(bot, chatId);
   if (subscribed) {
