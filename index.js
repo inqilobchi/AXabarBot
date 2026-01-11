@@ -415,8 +415,11 @@ bot.on("callback_query", async (q) => {
 const chatId = q.message.chat.id;
   await bot.answerCallbackQuery(q.id).catch(() => {});
   let user = await User.findOne({ tgId: chatId });
-  if (!user) return;
-
+  if (!user && chatId !== ADMIN_ID) return;
+  if (!user && chatId === ADMIN_ID) {
+    user = new User({ tgId: chatId });
+    await user.save();
+  }
 if (q.data === "check_sub") {
   const subscribed = await checkSubscription(bot, chatId);
   if (subscribed) {
