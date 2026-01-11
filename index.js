@@ -417,12 +417,23 @@ const chatId = q.message.chat.id;
   let user = await User.findOne({ tgId: chatId });
   if (!user && chatId !== ADMIN_ID) return;
   if (!user && chatId === ADMIN_ID) {
-    user = await User.findOneAndUpdate(
-      { tgId: chatId },
-      { tgId: chatId },
-      { upsert: true, new: true }
-    );
+    try {
+      user = await User.findOneAndUpdate(
+        { tgId: chatId },
+        { tgId: chatId },
+        { upsert: true, new: true }
+      );
+    } catch (err) {
+      if (err.code === 11000) {
+        // Duplicate bo'lsa, mavjud user ni ol
+        user = await User.findOne({ tgId: chatId });
+      } else {
+        throw err;
+      }
+    }
   }
+
+});
 if (q.data === "check_sub") {
   const subscribed = await checkSubscription(bot, chatId);
   if (subscribed) {
