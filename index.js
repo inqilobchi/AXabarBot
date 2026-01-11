@@ -200,9 +200,12 @@ const ensureSessionAlive = async (user) => {
 
 const checkSubscription = async (bot, userId) => {
   try {
+    console.log(`Checking subscription for user ${userId} in ${process.env.FORCE_CHANNEL}`);
     const member = await bot.getChatMember(process.env.FORCE_CHANNEL, userId);
+    console.log(`Member status: ${member.status}`);
     return ["member", "administrator", "creator"].includes(member.status);
   } catch (e) {
+    console.log(`Subscription check error: ${e.message}`);
     return false;
   }
 };
@@ -405,22 +408,26 @@ const chatId = q.message.chat.id;
   if (!user) return;
 
 if (q.data === "check_sub") {
-    const subscribed = await checkSubscription(bot, chatId);
-
-    if (subscribed) {
+  const subscribed = await checkSubscription(bot, chatId);
+  if (subscribed) {
+    try {
       await bot.editMessageText("✅ Obuna tasdiqlandi! Endi /start bosing", {
         chat_id: chatId,
         message_id: q.message.message_id,
         reply_markup: {}
       });
-    } else {
-      await bot.answerCallbackQuery(q.id, {
-        text: "❌ Hali obuna bo'lmagansiz. Kanalga qo'shiling!",
-        show_alert: true
-      });
+    } catch (editError) {
+      console.log("Edit message error:", editError.message);
+      await bot.answerCallbackQuery(q.id, { text: "Xatolik yuz berdi. Qayta urinib ko'ring.", show_alert: true });
     }
-    return; // ← Muhim! Qolgan kodga o'tkazmaymiz
+  } else {
+    await bot.answerCallbackQuery(q.id, {
+      text: "❌ Hali obuna bo'lmagansiz. Kanalga qo'shiling!",
+      show_alert: true
+    });
   }
+  return;
+}
 
   // Qolgan barcha callback'lar uchun faqat faol userlarni tekshirish
   const ok = await ensureUserActive(bot, user);
