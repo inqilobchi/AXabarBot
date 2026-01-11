@@ -229,30 +229,36 @@ const forceSubMessage = {
   }
 };
 
-const ensureUserActive = async (bot, user) => {
-  if (user.tgId === ADMIN_ID) return true;
-  if (user.blocked) return false;
+ const ensureUserActive = async (bot, user) => {
+       if (user.tgId === ADMIN_ID) return true;
+       if (user.blocked) return false;
 
-  const subOk = await checkSubscription(bot, user.tgId);
-  if (!subOk) {
-    user.blocked = true;
-    await user.save();
-    return false;
-  }
+       const subOk = await checkSubscription(bot, user.tgId);
+       if (!subOk) {
+         user.blocked = true;
+         await user.save();
+         return false;
+       } else {
+         // Yangi qo'shish: Agar obuna bor bo'lsa, blocked-ni olib tashlang
+         if (user.blocked) {
+           user.blocked = false;
+           await user.save();
+         }
+       }
 
-  const sessionOk = await ensureSessionAlive(user);
-  if (!sessionOk) {
-    try {
-      await bot.sendMessage(
-        user.tgId,
-        "⛔ Hisobingizdan bot chiqarilgan.\n🔁 Qayta ulanish uchun /start bosing"
-      );
-    } catch {}
-    return false;
-  }
+       const sessionOk = await ensureSessionAlive(user);
+       if (!sessionOk) {
+         try {
+           await bot.sendMessage(
+             user.tgId,
+             "⛔ Hisobingizdan bot chiqarilgan.\n🔁 Qayta ulanish uchun /start bosing"
+           );
+         } catch {}
+         return false;
+       }
 
-  return true;
-};
+       return true;
+     };
 
 // ===================== MENUS =====================
 const mainMenu = (isAdmin = false) => ({
