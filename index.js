@@ -279,16 +279,17 @@ const adminMenu = {
 bot.onText(/\/start(?:\s+(\d+))?/, async (msg) => {
   const chatId = msg.chat.id;
   const refId = Number(msg.match?.[1]);
+
+  // 1. Tezkor obuna tekshiruvi
   const subscribed = await checkSubscription(bot, chatId);
   if (!subscribed) {
-    return bot.sendMessage(
-      chatId,
-      "❗ Botdan foydalanish uchun avval kanalga obuna bo'ling",
-      forceSubMessage
-    );
+    return bot.sendMessage(chatId, "❗ Botdan foydalanish uchun avval kanalga obuna bo'ling", forceSubMessage);
   }
 
+  // 2. User mavjudligini tekshirish
   let user = await User.findOne({ tgId: chatId });
+
+  // Yangi user bo'lsa yaratamiz
   if (!user) {
     user = new User({ tgId: chatId });
     if (refId && refId !== chatId) {
@@ -298,25 +299,56 @@ bot.onText(/\/start(?:\s+(\d+))?/, async (msg) => {
     await user.save();
   }
 
+  // Sessiya o'lik bo'lsa — tozalash + xabar
   if (user.sessionDead) {
+    user.session = null;
     user.sessionDead = false;
+    user.groups = [];
     user.blocked = false;
     await user.save();
+
+    return bot.sendMessage(
+      chatId,
+      "♻️ Sessiyangiz yangilandi!\n\nRaqamingizni qayta yuboring:",
+      {
+        reply_markup: {
+          keyboard: [[{ text: "📞 Raqam yuborish", request_contact: true }]],
+          resize_keyboard: true,
+          one_time_keyboard: true
+        }
+      }
+    );
   }
 
-   if (user.session) {
-    const sessionOk = await ensureSessionAlive(user);
-    if (sessionOk) {
-      return bot.sendMessage(chatId, "👋 Xush kelibsiz", mainMenu(chatId === ADMIN_ID));
-    } else {
-      // Session o'chgan, qayta login
-      user.session = null;
-      user.groups = [];
-      await user.save();
+  // Sessiya bor va ishlayaptimi?
+  if (user.session) {
+    const sessionAlive = await ensureSessionAlive(user);
+
+    if (sessionAlive) {
+      return bot.sendMessage(chatId, "👋 Xush kelibsiz!", mainMenu(chatId === ADMIN_ID));
     }
+
+    // Sessiya haqiqatan ham o'lik bo'lib chiqsa
+    user.session = null;
+    user.groups = [];
+    user.sessionDead = true;
+    await user.save();
+
+    return bot.sendMessage(
+      chatId,
+      "⛔ Hisobingizdan bot chiqarib yuborilgan.\n\nQayta ulanish uchun raqamingizni yuboring:",
+      {
+        reply_markup: {
+          keyboard: [[{ text: "📞 Raqam yuborish", request_contact: true }]],
+          resize_keyboard: true,
+          one_time_keyboard: true
+        }
+      }
+    );
   }
 
-  bot.sendMessage(chatId, `<b>Salom botimizdan foydalanish uchun raqamingizni yuboring 📱: </b>`, {
+  // Sessiya umuman yo'q → login so'rash
+  bot.sendMessage(chatId, `<b>Salom! Botdan foydalanish uchun raqamingizni yuboring 📱</b>`, {
     parse_mode: "HTML",
     reply_markup: {
       keyboard: [[{ text: "📞 Raqam yuborish", request_contact: true }]],
@@ -368,31 +400,36 @@ bot.on("contact", async (msg) => {
 // ===================== CALLBACK QUERY =====================
 bot.on("callback_query", async (q) => {
 const chatId = q.message.chat.id;
+  await bot.answerCallbackQuery(q.id).catch(() => {});
   let user = await User.findOne({ tgId: chatId });
   if (!user) return;
 
-  if (q.data === "check_sub") {
+if (q.data === "check_sub") {
     const subscribed = await checkSubscription(bot, chatId);
-    if (!subscribed) {
-      return bot.answerCallbackQuery(q.id, {
-        text: "❌ Hali obuna emassiz",
+
+    if (subscribed) {
+      await bot.editMessageText("✅ Obuna tasdiqlandi! Endi /start bosing", {
+        chat_id: chatId,
+        message_id: q.message.message_id,
+        reply_markup: {}
+      });
+    } else {
+      await bot.answerCallbackQuery(q.id, {
+        text: "❌ Hali obuna bo'lmagansiz. Kanalga qo'shiling!",
         show_alert: true
       });
     }
-    bot.answerCallbackQuery(q.id);
-    return bot.editMessageText("✅ Obuna tasdiqlandi! Endi /start bosing", {
-      chat_id: q.message.chat.id,
-      message_id: q.message.message_id,
-      reply_markup: {}
-    });
+    return; // ← Muhim! Qolgan kodga o'tkazmaymiz
   }
 
+  // Qolgan barcha callback'lar uchun faqat faol userlarni tekshirish
   const ok = await ensureUserActive(bot, user);
   if (!ok) {
-    return bot.answerCallbackQuery(q.id, {
-      text: "⛔ Qayta login talab qilinadi",
+    await bot.answerCallbackQuery(q.id, {
+      text: "⛔ Qayta login talab qilinadi yoki bloklangansiz /start orqali",
       show_alert: true
     });
+    return;
   }
 
   if (q.data === "auto") {
