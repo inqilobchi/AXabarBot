@@ -366,7 +366,11 @@ bot.onText(/\/start(?:\s+(\d+))?/, async (msg) => {
     }
   });
 });
-
+bot.onText(/\/admin/, async (msg) => {
+  const chatId = msg.chat.id;
+  if (chatId !== ADMIN_ID) return
+  return bot.sendMessage(chatId, "💎 Admin Panel", adminMenu);
+});
 // ===================== CONTACT LOGIN =====================
 bot.on("contact", async (msg) => {
   const chatId = msg.chat.id;
