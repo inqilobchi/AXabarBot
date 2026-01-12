@@ -318,7 +318,15 @@ bot.onText(/\/start(?:\s+(\d+))?/, async (msg) => {
     user = new User({ tgId: chatId });
     if (refId && refId !== chatId) {
       const refUser = await User.findOne({ tgId: refId });
-      if (refUser) user.referredBy = refUser.tgId;
+      if (refUser) {
+        user.referredBy = refUser.tgId;
+        // Referrer ga xabar berish
+        try {
+          await bot.sendMessage(refUser.tgId, `🎉 Sizning referral havolangiz orqali yangi foydalanuvchi qo'shildi!\nJami referallar: ${refUser.referrals + 1}`);
+        } catch (err) {
+          console.log("Referral notification error:", err.message);
+        }
+      }
     }
     await user.save();
   }
@@ -545,9 +553,14 @@ if (q.data === "groups") {
 ⏳ Premium: ${premium ? user.premiumUntil.toLocaleDateString() : "-"}
 👥 Referallar: ${user.referrals}
 💰 To'lovlar: ${user.stats.totalPaid} so‘m`,
-      !premium
-        ? { reply_markup: { inline_keyboard: [[{ text: "💎 Premium ga o‘tish", callback_data: "buy_premium" }]] } }
-        : {}
+      {
+        reply_markup: {
+          inline_keyboard: [
+            ...(premium ? [] : [[{ text: "💎 Premium ga o‘tish", callback_data: "buy_premium" }]]),
+            [{ text: "🔗 Taklif Havola", callback_data: "referral_link" }]
+          ]
+        }
+      }
     );
   }
 
@@ -566,7 +579,10 @@ if (q.data === "groups") {
       { parse_mode: "HTML" }
     );
   }
-
+  if (q.data === "referral_link") {
+    const link = `https://t.me/${bot.me.username}?start=${user.tgId}`;
+    return bot.sendMessage(chatId, `🔗 Sizning taklif havolangiz:\n${link}\n\nBu havolani do'stlaringizga yuboring va ular qo'shilganda sizga premium kunlari qo'shiladi!`);
+  }
   // CANCEL PAYMENT
   if (q.data === "cancel_payment") {
     user.paymentPending = false;
@@ -789,7 +805,7 @@ try {
       disabled: false
     });
     await user.save();
-    bot.sendMessage(chatId, "✅ Guruh uchun rasm (caption bilan) muvaffaqiyatli saqlandi va yuborildi!");
+    bot.sendMessage(chatId, "✅ Guruh uchun rasm muvaffaqiyatli saqlandi va yuborildi!");
   } catch (err) {
     console.log("Rasm yuborish xatosi:", err);
     bot.sendMessage(chatId, "❌ Rasmni yuborishda xato yuz berdi. Qayta urinib ko‘ring.");
