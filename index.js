@@ -15,23 +15,7 @@ const SESSION_CACHE_TIME = 2 * 60 * 1000;
 const ADMIN_ID = Number(process.env.ADMIN_ID);
 
 mongoose.connect(process.env.MONGO_URI);
-mongoose.connection.once('open', async () => {
-  try {
-    await mongoose.connection.db.collection('users').dropIndex('chatId_1');
-    console.log('Dropped old index chatId_1');
-  } catch (err) {
-    console.log('Index chatId_1 not found or already dropped');
-  }
-  try {
-    await mongoose.connection.db.collection('users').createIndex({ tgId: 1 }, { unique: true });
-    console.log('Created new index on tgId');
-  } catch (err) {
-    console.log('Index on tgId already exists');
-  }
-  const deleted = await User.deleteMany({ $or: [{ tgId: null }, { chatId: null }] });
-  console.log(`Deleted ${deleted.deletedCount} null documents`);
-});
-// ... boshqa require lar
+
 
 const GroupSchema = new mongoose.Schema({
   id: String,
