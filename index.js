@@ -274,6 +274,7 @@ const mainMenu = (isAdmin = false) => ({
 const adminMenu = {
   reply_markup: {
     inline_keyboard: [
+      [{ text: "📢 E'lon", callback_data: "adm_broadcast" }],
       [{ text: "📊 Kunlik statistika", callback_data: "adm_daily" }],
       [{ text: "👥 Userlar", callback_data: "adm_users" }],
       [{ text: "⛔ User to'xtatish", callback_data: "adm_block" }],
@@ -625,7 +626,10 @@ if (q.data === "groups") {
     const dead = await User.countDocuments({ sessionDead: true });
     return bot.sendMessage(chatId, `💀 Sessiyasi o'lgan userlar: ${dead}`);
   }
-
+  if (chatId === ADMIN_ID && q.data === "adm_broadcast") {
+    state.admin = "broadcast";
+    return bot.sendMessage(chatId, "📢 Barcha foydalanuvchilarga yuboriladigan xabarni yuboring:");
+  }
   if (chatId === ADMIN_ID && q.data.startsWith("pay_ok_")) {
     const userId = Number(q.data.split("_")[2]);
     const target = await User.findOne({ tgId: userId });
@@ -707,6 +711,23 @@ bot.on("message", async (msg) => {
   if (!state[chatId] && !state.admin) return;
   if (state.admin) {
     const action = state.admin;
+    if (action === "broadcast" && chatId === ADMIN_ID) {
+      // Barcha userlarga xabar yuborish
+      const allUsers = await User.find({ blocked: false });
+      let sentCount = 0;
+      for (const u of allUsers) {
+        if (u.tgId) {
+          try {
+            await bot.sendMessage(u.tgId, msg.text || msg.caption || "Xabar yo'q");
+            sentCount++;
+          } catch (err) {
+            console.log(`Broadcast error to ${u.tgId}:`, err.message);
+          }
+        }
+      }
+      delete state.admin;
+      return bot.sendMessage(chatId, `✅ E'lon yuborildi! ${sentCount} ta foydalanuvchiga yetkazildi.`);
+    }
     const targetId = Number(msg.text);
     if (isNaN(targetId)) {
       return bot.sendMessage(chatId, "❌ Noto'g'ri ID");
