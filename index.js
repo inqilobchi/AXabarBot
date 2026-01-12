@@ -341,7 +341,7 @@ bot.onText(/\/start(?:\s+(\d+))?/, async (msg) => {
     const sessionAlive = await ensureSessionAlive(user);
 
     if (sessionAlive) {
-      return bot.sendMessage(chatId, "👋 Xush kelibsiz!", mainMenu(chatId === ADMIN_ID));
+      return bot.sendMessage(chatId, "📨", mainMenu(chatId === ADMIN_ID));
     }
 
     // Sessiya haqiqatan ham o'lik bo'lib chiqsa
