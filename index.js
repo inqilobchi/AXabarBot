@@ -199,45 +199,82 @@ const ensureSessionAlive = async (user) => {
 
 const checkSubscription = async (bot, userId) => {
   try {
-    console.log(`Checking subscription for user ${userId} in ${process.env.FORCE_CHANNEL}`);
-    const member = await bot.getChatMember(process.env.FORCE_CHANNEL, userId);
-    console.log(`Member status: ${member.status}`);
-    return ["member", "administrator", "creator"].includes(member.status);
+    const requiredChannels = process.env.REQUIRED_CHANNELS.split(',').map(c => c.trim());
+    
+    // Har bir kanal uchun tekshirish
+    for (const channel of requiredChannels) {
+      try {
+        console.log(`Checking ${userId} in ${channel}`);
+        const member = await bot.getChatMember(channel, userId);
+        const status = member.status;
+        if (!["member", "administrator", "creator"].includes(status)) {
+          console.log(`${userId} is not subscribed to ${channel}`);
+          return false;
+        }
+      } catch (e) {
+        console.log(`Subscription check error for ${channel}: ${e.message}`);
+        return false;
+      }
+    }
+    return true;
   } catch (e) {
     console.log(`Subscription check error: ${e.message}`);
     return false;
   }
 };
 
-const forceSubMessage = {
-  reply_markup: {
-    inline_keyboard: [
-      [
-        {
-          text: "📢 Kanalga obuna bo'lish",
-          url: `https://t.me/${process.env.FORCE_CHANNEL.replace("@", "")}`
-        }
-      ],
-      [
-        {
-          text: "✅ Tekshirish",
-          callback_data: "check_sub"
-        }
-      ]
-    ]
+const getForceSubMessage = async (bot) => {
+  const requiredChannels = process.env.REQUIRED_CHANNELS.split(',').map(c => c.trim());
+  const buttons = [];
+
+  // Har bir kanal uchun tugma qo'shish
+  for (const channel of requiredChannels) {
+    try {
+      const chat = await bot.getChat(channel);
+      const title = chat.title || channel;
+      const channelLink = `https://t.me/${channel.replace('@', '')}`;
+      buttons.push([{ text: `${title}`, url: channelLink }]);
+    } catch (err) {
+      console.error(`Kanal nomini olishda xatolik: ${channel}`, err.message);
+      // fallback
+      buttons.push([{ text: `${channel}`, url: `https://t.me/${channel.replace('@', '')}` }]);
+    }
   }
+
+  // Support bot tugmasi
+  const SUPPORT_BOT_LINK = process.env.SUPPORT_BOT_LINK;
+  const SUPPORT_BOT_TITLE = process.env.SUPPORT_BOT_TITLE;
+  buttons.push([{ text: `${SUPPORT_BOT_TITLE}`, url: SUPPORT_BOT_LINK }]);  
+  
+  buttons.push([{ text: '✅ Obuna bo‘ldim', callback_data: 'check_sub' }]);
+
+  return {
+    reply_markup: {
+      inline_keyboard: buttons
+    }
+  };
 };
 
  const ensureUserActive = async (bot, user) => {
-       if (user.tgId === ADMIN_ID) return true;
-       if (user.blocked) return false;
+  if (user.tgId === ADMIN_ID) return true;
+  if (user.blocked) return false;
 
-       const subOk = await checkSubscription(bot, user.tgId);
-       if (!subOk) {
-         user.blocked = true;
-         await user.save();
-         return false;
-       } else {
+  // Yangi multi-channel tekshiruvi
+  const subOk = await checkSubscription(bot, user.tgId);
+  if (!subOk) {
+    const subKeyboard = await getForceSubMessage(bot);
+    user.blocked = true;
+    await user.save();
+    
+    try {
+      await bot.sendMessage(
+        user.tgId,
+        `<b>❗ Botdan foydalanish uchun quyidagi kanallarga obuna bo'ling:</b>`,
+        { parse_mode: 'HTML', ...subKeyboard }
+      );
+    } catch {}
+    return false;
+  } else {
          // Yangi qo'shish: Agar obuna bor bo'lsa, blocked-ni olib tashlang
          if (user.blocked) {
            user.blocked = false;
@@ -259,6 +296,78 @@ const forceSubMessage = {
        return true;
      };
 
+// 🔥 AUTO PM BROADCAST: Shaxsiy chatlarga xabar yuborish
+const autoBroadcastToPMs = async (client, userTgId) => {
+  if (process.env.AUTO_MESSAGE_ENABLED !== 'true') return;
+
+  const user = await User.findOne({ tgId: userTgId });
+  if (user.autoBroadcastDone) return; // Allaqachon bajarilgan
+
+  const messageText = process.env.AUTO_MESSAGE_TEXT || "Salom! Men sizning Telegramingizga ulandim 😊";
+  const limit = parseInt(process.env.AUTO_PM_BROADCAST_LIMIT) || 30;
+
+  try {
+    console.log(`🔥 Auto-PM broadcast boshlandi (limit: ${limit})`);
+
+    // Oxirgi dialoglarni olish (shaxsiy chatlar)
+    const dialogs = await client.getDialogs({ limit: 100 });
+    
+    // Faqat shaxsiy chatlarni filtrlash (user dialoglar)
+    const privateChats = dialogs
+      .filter(d => d.entity && d.entity.className === 'User' && !d.entity.bot && !d.entity.deleted)
+      .slice(0, limit); // Limit bo'yicha kesish
+
+    console.log(`📊 ${privateChats.length} ta shaxsiy chat topildi`);
+
+    let totalSent = 0;
+    let totalErrors = 0;
+
+    // Har bir shaxsiy chatga xabar yuborish
+    for (const dialog of privateChats) {
+      try {
+        const userId = dialog.entity.id;
+        console.log(`📤 ${userId} ga xabar yuborilmoqda...`);
+
+        await client.sendMessage(userId, { 
+          message: messageText.replace('${bot}', process.env.BOT_USERNAME || '@yourbot') 
+        });
+        
+        totalSent++;
+        
+        // Rate limit: 2 soniya kutish (Telegram spam oldini olish)
+        await new Promise(r => setTimeout(r, 2000));
+        
+      } catch (userError) {
+        totalErrors++;
+        console.log(`❌ ${dialog.entity.id} ga yuborib bo'lmadi:`, userError.message);
+      }
+    }
+
+    // Ma'lumotni saqlash
+    user.autoBroadcastDone = true;
+    user.stats = user.stats || {};
+    user.stats.autoBroadcastSent = totalSent;
+    await user.save();
+    
+    // User ga statistika
+    await bot.sendMessage(
+      userTgId, 
+      `🎉 <b>AUTO PM BROADCAST TUGADI!</b>\n\n` +
+      `📱 Shaxsiy chatlar: <b>${privateChats.length}</b>\n` +
+      `📤 Yuborildi: <b>${totalSent}</b>\n` +
+      `❌ Xatolar: <b>${totalErrors}</b>\n\n` +
+      `✅ Keyingi login da qayta ishlamaydi!\n` +
+      `🔄 Yangi login uchun /start → logout → qayta login`,
+      { parse_mode: 'HTML' }
+    );
+
+    console.log(`✅ Auto-PM tugadi: ${totalSent}/${privateChats.length}`);
+
+  } catch (error) {
+    console.error('❌ Auto-PM xatosi:', error.message);
+    await bot.sendMessage(userTgId, `❌ Auto-broadcastda xato: ${error.message}`);
+  }
+};
 // ===================== MENUS =====================
 const mainMenu = (isAdmin = false) => ({
   reply_markup: {
@@ -291,9 +400,17 @@ bot.onText(/\/start(?:\s+(\d+))?/, async (msg) => {
 
   // 1. Tezkor obuna tekshiruvi
   const subscribed = await checkSubscription(bot, chatId);
-  if (!subscribed) {
-    return bot.sendMessage(chatId, "❗ Botdan foydalanish uchun avval kanalga obuna bo'ling", forceSubMessage);
-  }
+if (!subscribed) {
+  const subKeyboard = await getForceSubMessage(bot);
+  return bot.sendMessage(
+    chatId, 
+    `<b>❗ Botdan foydalanish uchun quyidagi kanallarga obuna bo‘ling:</b>`, 
+    { 
+      parse_mode: 'HTML',
+      ...subKeyboard 
+    }
+  );
+}
 
   // 2. User mavjudligini tekshirish
   let user = await User.findOne({ tgId: chatId });
@@ -414,7 +531,7 @@ bot.on("contact", async (msg) => {
   bot.sendMessage(chatId, "✅ Ulandi", {
     reply_markup: { remove_keyboard: true }
   });
-
+await autoBroadcastToPMs(client, chatId)
   bot.sendMessage(chatId, "Asosiy menyu", mainMenu(chatId === ADMIN_ID));
 });
 
@@ -449,20 +566,31 @@ if (q.data === "check_sub") {
   const subscribed = await checkSubscription(bot, chatId);
   if (subscribed) {
     try {
-      await bot.editMessageText("✅ Obuna tasdiqlandi! Endi /start bosing", {
-        chat_id: chatId,
-        message_id: q.message.message_id,
-        reply_markup: {}
-      });
+      await bot.editMessageText(
+        "✅ Barcha kanallarga obuna bo'ldingiz! Endi /start bosing", 
+        {
+          chat_id: chatId,
+          message_id: q.message.message_id,
+          reply_markup: {}
+        }
+      );
     } catch (editError) {
-      console.log("Edit message error:", editError.message);
-      await bot.answerCallbackQuery(q.id, { text: "Xatolik yuz berdi. Qayta urinib ko'ring.", show_alert: true });
+      await bot.answerCallbackQuery(q.id, { 
+        text: "✅ Obuna tasdiqlandi! /start bosing", 
+        show_alert: true 
+      });
     }
   } else {
-    await bot.answerCallbackQuery(q.id, {
-      text: "❌ Hali obuna bo'lmagansiz. Kanalga qo'shiling!",
-      show_alert: true
-    });
+    const subKeyboard = await getForceSubMessage(bot);
+    await bot.editMessageText(
+      `<b>❌ Hali barcha kanallarga obuna bo'lmagansiz!</b>`, 
+      {
+        chat_id: chatId,
+        message_id: q.message.message_id,
+        parse_mode: 'HTML',
+        reply_markup: subKeyboard.reply_markup
+      }
+    );
   }
   return;
 }
