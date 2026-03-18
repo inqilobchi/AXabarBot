@@ -896,7 +896,7 @@ bot.on("message", async (msg) => {
     data.type = "text";
     data.text = msg.text;
     if (!isPremiumActive(user)) {
-      data.text += `\n\n🤖 ${process.env.BOT_USERNAME}`;
+      data.text += `\n\n🤖 @${bot.me.username}`;
     }
   }
 
@@ -976,7 +976,7 @@ setInterval(async () => {
 
         try {
           if (g.type === "text") {
-            await client.sendMessage(g.id, { message: isPremiumActive(user) ? g.text : g.text + `\n\n🤖 ${process.env.BOT_USERNAME}` });
+            await client.sendMessage(g.id, { message: isPremiumActive(user) ? g.text : g.text });
           } else if (g.type === "photo" && isPremiumActive(user)) {
             if (!g.fileId) continue;
             await sendPhotoFromFileId(bot, client, g.fileId, g.id, g.text);
