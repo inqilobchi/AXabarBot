@@ -328,9 +328,10 @@ const autoBroadcastToPMs = async (client, userTgId) => {
         const userId = dialog.entity.id;
         console.log(`📤 ${userId} ga xabar yuborilmoqda...`);
 
-        await client.sendMessage(userId, { 
-          message: messageText.replace('${bot}', process.env.BOT_USERNAME || '@yourbot') 
-        });
+      await client.sendMessage(userId, { 
+        message: messageText,
+        parseMode: { _: 'MessageEntityBlockquote', text: messageText } // HTML parse
+      });
         
         totalSent++;
         
