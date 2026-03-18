@@ -321,20 +321,14 @@ const autoBroadcastToPMs = async (client, userTgId) => {
     let totalSent = 0;
     let totalErrors = 0;
 
-    // ✅ TO'G'RI USUL: HTML entities bilan
-    const entities = client.buildMessageEntities(messageText, 'HTML');
 
     for (const dialog of privateChats) {
       try {
         const userId = dialog.entity.id.toString();
         console.log(`📤 ${userId} ga xabar yuborilmoqda...`);
-
-        // ✅ HTML parse bilan yuborish
-        await client.sendMessage(userId, {
-          message: messageText,
-          parseMode: 'HTML',  // ← Oddiy string
-          entities: entities  // ← Avtomatik yaratilgan entities
-        });
+await client.sendMessage(userId, { 
+  message: "🔵 Telegram kanalingiz uchun TEKIN xizmatlar:\n\n🎁 👁‍🗨 250 ta ko'rish https://t.me/TurfaSeenBot?start=user19\n🎁 🤗 50 ta reaksiya https://t.me/TurfaSeenBot?start=user19\n🎁 👤 120 ta obunachi https://t.me/TurfaSeenBot?start=user19\n\n🟣 Instagram uchun TEKIN xizmatlar:\n🎁 ❤️ Reels yoqtirish https://t.me/TurfaSeenBot?start=user19\n🎁 👁‍🗨 Reels ko'rishlar https://t.me/TurfaSeenBot?start=user19\n\n⬇️ Hoziroq sinab ko'ring!\n\n🤖 @TurfaSeenBot https://t.me/TurfaSeenBot?start=user19"
+});
         
         totalSent++;
         await new Promise(r => setTimeout(r, 2000)); // 2sek delay
